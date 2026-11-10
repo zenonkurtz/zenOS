@@ -1,0 +1,87 @@
+name: Build ZenOS ISO
+
+on:
+  workflow_dispatch:        # botão "Run workflow" na aba Actions
+  push:
+    tags:
+      - "v*"                # ao criar uma tag (ex.: v0.1) publica em Releases
+  # schedule:               # descomente para gerar uma ISO nova toda semana
+  #   - cron: "0 5 * * 1"
+
+permissions:
+  contents: write           # necessário para criar a Release
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Liberar espaço em disco
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Definir versão
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # O build roda dentro de um container Debian 12 para que a versão do
+      # live-build seja a mesma da base do ZenOS (o Ubuntu usa um fork diferente).
+      - name: Construir a ISO (Debian 12 em container)
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD":/work -w /work \
+            debian:bookworm \
+            bash -c "apt-get update && apt-get install -y ca-certificates && bash ./build-zenos.sh"
+
+      - name: Renomear a ISO e gerar checksum
+        run: |
+          sudo chown -R "$USER":"$USER" zenos-build
+          ISO_SRC=$(ls zenos-build/*.iso | head -n1)
+          ISO="zenos-${{ steps.ver.outputs.version }}-amd64.iso"
+          mv "$ISO_SRC" "$ISO"
+          sha256sum "$ISO" > "$ISO.sha256"
+          ls -lh "$ISO" "$ISO.sha256"
+          echo "ISO_FILE=$ISO" >> "$GITHUB_ENV"
+
+      - name: Enviar ISO como artefato (baixar na página do workflow)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenos-iso
+          path: |
+            zenos-*.iso
+            zenos-*.iso.sha256
+          retention-days: 14
+          compression-level: 0
+
+      - name: Enviar log do build (para depurar erros)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: zenos-build/build.log
+          if-no-files-found: ignore
+
+      - name: Publicar em Releases (somente em tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ZenOS ${{ steps.ver.outputs.version }}
+          body: |
+            ZenOS - distro de pentest ofensivo baseada em Debian 12.
+            Verifique a integridade com o arquivo `.sha256`.
+            Use somente em sistemas que você tem autorização para testar.
+          files: |
+            zenos-*.iso
+            zenos-*.iso.sha256
